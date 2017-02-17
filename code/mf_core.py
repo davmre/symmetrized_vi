@@ -10,6 +10,7 @@ import elbow.util as util
 
 from elbow import Gaussian, Model
 from elbow.models.factorizations import NoisyGaussianMatrixProduct, BatchDenseGeneratorByUser
+from elbow.transforms import UnaryTransform, Exp
 from elbow.models.symmetry_qs import SignFlipGaussian, DiagonalRotationMixture, GaussianMonteCarlo, DiagonalRotationMixtureJensen, general_orthog_correction, LargeInitGaussian
 
 from elbow.structure import split_at_row
@@ -26,8 +27,21 @@ def sample_mf_data(n, m, k, sigma_n, sigma_prior=1.0, seed=None):
     return X, R
 
 
+def lognormal(*args, **kwargs):
+    g = Gaussian(*args, **kwargs)
+    lg = UnaryTransform(g, Exp,
+                        name="%s_lognormal" % g.name)
+    return lg
+    
 
-def build_simple_mf_model(n, m, model_k, sigma_n, sigma_prior=1.0):
+def build_simple_mf_model(n, m, model_k, sigma_n=None, sigma_prior=1.0):
+
+    if sigma_n is None:
+        sigma_n = lognormal(mean=-1, std=3, shape=(1,))
+
+    if sigma_prior is None:
+        sigma_prior = lognormal(mean=0, std=2, shape=(1,))
+            
     A = Gaussian(mean=0.0, std=sigma_prior, shape=(n, model_k), name="A")
     B = Gaussian(mean=0.0, std=sigma_prior, shape=(m, model_k), name="B")
     C = NoisyGaussianMatrixProduct(A=A, B=B, std=sigma_n, name="C", rescale=True)
@@ -37,23 +51,15 @@ def build_simple_mf_model(n, m, model_k, sigma_n, sigma_prior=1.0):
     jm = Model(C)
     return jm, q_C
 
-def build_sparse_mf_model(n, m, model_k, row_idxs, col_idxs):
-    A = Gaussian(mean=0.0, std=sigma_prior, shape=(n, model_k), name="A")
-    B = Gaussian(mean=0.0, std=sigma_prior, shape=(m, model_k), name="B")
-    C = NoisySparseGaussianMatrixProduct(A=A, B=B, std=sigma_n,
-                                         row_idxs=row_idxs,
-                                         col_idxs=col_idxs,
-                                         name="C",
-                                         rescale=True)
-
-    q_C = C.observe_placeholder()
-
-    jm = Model(C)
-
-
-def build_local_mf_model(n, m, model_k, batch_size, sigma_n,
+def build_local_mf_model(n, m, model_k, batch_size, sigma_n=None,
                          sigma_prior=1.0, rotational=False):
 
+    if sigma_n is None:
+        sigma_n = lognormal(mean=-1, std=3, shape=(1,), name="sigma_n")
+
+    if sigma_prior is None:
+        sigma_prior = lognormal(mean=0, std=2, shape=(1,), name="sigma_prior")
+    
     batch_ratings = tf.placeholder(shape=(batch_size,m), dtype=np.float32)
     batch_mask = tf.placeholder(shape=(batch_size,m), dtype=np.float32)
 
@@ -195,6 +201,7 @@ def local_posterior(lmodel, user_rows):
     qA = jm["A"].q_distribution()
     qB = jm["B"].q_distribution()
     qBmean = jm.session.run(qB.mean)
+    qBstd = jm.session.run(qB.std)
 
     
     qAmeans = []
@@ -208,9 +215,22 @@ def local_posterior(lmodel, user_rows):
         qAstds.append(local_qAstd.copy())
         
     qAmean = np.vstack(qAmeans)[:n]
-    qAstds = np.vstack(qAstds)[:n]
+    qAstd = np.vstack(qAstds)[:n]
 
     k = qBmean.shape[1]
     qRmean = np.dot(qAmean, qBmean.T) / np.sqrt(k)
-    return qAmean, qBmean, qRmean
+
+    vA = qAstd**2
+    vB = qBstd**2
+    vR = (np.dot(vA, vB.T) + np.dot(qAmean**2, vB.T) + np.dot(vA, qBmean.T)) / k
+    qRstd = np.sqrt(vR)
+
+    post = {"qAmean": qAmean,
+            "qAstd": qAstd,
+            "qBmean": qBmean,
+            "qBstd": qBstd,
+            "qRmean": qRmean,
+            "qRstd": qRstd }
+    
+    return post
 
